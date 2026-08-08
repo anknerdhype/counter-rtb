@@ -3,6 +3,17 @@ const API = window.location.origin + '/api';
 let currentEmployee = null;
 let currentCount = 0;
 
+async function apiFetch(url, options) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await fetch(url, options);
+      if (res.ok) return res;
+    } catch (e) {}
+    await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+  }
+  return fetch(url, options);
+}
+
 function formatDate(dateStr) {
   const parts = dateStr.split('-');
   return `${parts[2]}.${parts[1]}.${parts[0]}`;
@@ -30,7 +41,7 @@ function showDate() {
 }
 
 async function loadEmployees() {
-  const res = await fetch(API + '/employees');
+  const res = await apiFetch(API + '/employees');
   const employees = await res.json();
 
   const tabsContainer = document.getElementById('tabs');
@@ -61,14 +72,14 @@ async function selectEmployee(name) {
 }
 
 async function loadCount() {
-  const res = await fetch(`${API}/count/${encodeURIComponent(currentEmployee)}?date=${todayString()}`);
+  const res = await apiFetch(`${API}/count/${encodeURIComponent(currentEmployee)}?date=${todayString()}`);
   const data = await res.json();
   currentCount = data.count;
   document.getElementById('counterValue').textContent = currentCount;
 }
 
 async function increment() {
-  const res = await fetch(`${API}/count/${encodeURIComponent(currentEmployee)}/increment`, { method: 'POST' });
+  const res = await apiFetch(`${API}/count/${encodeURIComponent(currentEmployee)}/increment`, { method: 'POST' });
   const data = await res.json();
   currentCount = data.count;
   document.getElementById('counterValue').textContent = currentCount;
@@ -78,7 +89,7 @@ async function increment() {
 
 async function decrement() {
   if (currentCount <= 0) return;
-  const res = await fetch(`${API}/count/${encodeURIComponent(currentEmployee)}/decrement`, { method: 'POST' });
+  const res = await apiFetch(`${API}/count/${encodeURIComponent(currentEmployee)}/decrement`, { method: 'POST' });
   const data = await res.json();
   currentCount = data.count;
   document.getElementById('counterValue').textContent = currentCount;
@@ -98,7 +109,7 @@ async function loadHistory() {
     url += `&month=${month}`;
   }
 
-  const res = await fetch(url);
+  const res = await apiFetch(url);
   const rows = await res.json();
 
   const tbody = document.getElementById('historyBody');
