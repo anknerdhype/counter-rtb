@@ -31,13 +31,22 @@ async function initDatabase() {
   `);
 }
 
+// Datum immer in deutscher Zeitzone bestimmen, unabhaengig von der Server-Zeitzone.
 function todayString() {
-  const now = new Date();
-  const y = now.getFullYear();
-  const m = String(now.getMonth() + 1).padStart(2, '0');
-  const d = String(now.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Berlin' }).format(new Date());
 }
+
+function isValidDate(value) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value);
+}
+
+function isValidMonth(value) {
+  return /^\d{4}-\d{2}$/.test(value);
+}
+
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', date: todayString() });
+});
 
 app.get('/api/employees', (req, res) => {
   res.json(EMPLOYEES);
@@ -50,6 +59,9 @@ app.get('/api/count/:employee', async (req, res) => {
 
     if (!EMPLOYEES.includes(employee)) {
       return res.status(400).json({ error: 'Unbekannter Mitarbeiter' });
+    }
+    if (!isValidDate(date)) {
+      return res.status(400).json({ error: 'Ungueltiges Datum' });
     }
 
     const result = await pool.query(
@@ -74,14 +86,12 @@ app.post('/api/count/:employee/increment', async (req, res) => {
       return res.status(400).json({ error: 'Unbekannter Mitarbeiter' });
     }
 
-    await pool.query(
-      `INSERT INTO counts (employee, date, count) VALUES ($1, $2, 1)
-       ON CONFLICT (employee, date) DO UPDATE SET count = counts.count + 1`,
-      [employee, date]
-    );
-
+    // Eine einzige atomare Anweisung: entweder sie schreibt und liefert den
+    // neuen Stand, oder sie schreibt gar nicht. Kein Zwischenzustand.
     const result = await pool.query(
-      'SELECT count FROM counts WHERE employee = $1 AND date = $2',
+      `INSERT INTO counts (employee, date, count) VALUES ($1, $2, 1)
+       ON CONFLICT (employee, date) DO UPDATE SET count = counts.count + 1
+       RETURNING count`,
       [employee, date]
     );
 
@@ -101,18 +111,23 @@ app.post('/api/count/:employee/decrement', async (req, res) => {
       return res.status(400).json({ error: 'Unbekannter Mitarbeiter' });
     }
 
-    await pool.query(
-      `UPDATE counts SET count = count - 1 WHERE employee = $1 AND date = $2 AND count > 0`,
+    const updated = await pool.query(
+      `UPDATE counts SET count = count - 1
+       WHERE employee = $1 AND date = $2 AND count > 0
+       RETURNING count`,
       [employee, date]
     );
 
-    const result = await pool.query(
+    if (updated.rows.length > 0) {
+      return res.json({ employee, date, count: updated.rows[0].count });
+    }
+
+    const current = await pool.query(
       'SELECT count FROM counts WHERE employee = $1 AND date = $2',
       [employee, date]
     );
 
-    const count = result.rows.length > 0 ? result.rows[0].count : 0;
-    res.json({ employee, date, count });
+    res.json({ employee, date, count: current.rows.length > 0 ? current.rows[0].count : 0 });
   } catch (err) {
     console.error('Fehler bei POST /decrement:', err.message);
     res.status(500).json({ error: 'Datenbankfehler' });
@@ -123,16 +138,24 @@ app.get('/api/history', async (req, res) => {
   try {
     const { employee, month } = req.query;
 
-    let query = 'SELECT employee, date, count FROM counts WHERE count > 0';
+    // Datum als Text aus der Datenbank: keine Zeitzonen-Umrechnung moeglich.
+    let query = `SELECT employee, TO_CHAR(date, 'YYYY-MM-DD') AS date, count
+                 FROM counts WHERE count > 0`;
     const params = [];
     let paramIndex = 1;
 
     if (employee) {
+      if (!EMPLOYEES.includes(employee)) {
+        return res.status(400).json({ error: 'Unbekannter Mitarbeiter' });
+      }
       query += ` AND employee = $${paramIndex++}`;
       params.push(employee);
     }
 
     if (month) {
+      if (!isValidMonth(month)) {
+        return res.status(400).json({ error: 'Ungueltiger Monat' });
+      }
       query += ` AND TO_CHAR(date, 'YYYY-MM') = $${paramIndex++}`;
       params.push(month);
     }
@@ -140,14 +163,7 @@ app.get('/api/history', async (req, res) => {
     query += ' ORDER BY date DESC, employee ASC';
 
     const result = await pool.query(query, params);
-
-    const rows = result.rows.map(row => ({
-      employee: row.employee,
-      date: row.date.toISOString().split('T')[0],
-      count: row.count
-    }));
-
-    res.json(rows);
+    res.json(result.rows);
   } catch (err) {
     console.error('Fehler bei GET /history:', err.message);
     res.status(500).json({ error: 'Datenbankfehler' });
@@ -158,12 +174,15 @@ app.get('/api/export/csv', async (req, res) => {
   try {
     const { month } = req.query;
 
-    let query = 'SELECT employee, date, count FROM counts WHERE count > 0';
+    let query = `SELECT employee, TO_CHAR(date, 'DD.MM.YYYY') AS datum, count
+                 FROM counts WHERE count > 0`;
     const params = [];
-    let paramIndex = 1;
 
     if (month) {
-      query += ` AND TO_CHAR(date, 'YYYY-MM') = $${paramIndex++}`;
+      if (!isValidMonth(month)) {
+        return res.status(400).json({ error: 'Ungueltiger Monat' });
+      }
+      query += ` AND TO_CHAR(date, 'YYYY-MM') = $1`;
       params.push(month);
     }
 
@@ -171,12 +190,9 @@ app.get('/api/export/csv', async (req, res) => {
 
     const result = await pool.query(query, params);
 
-    let csv = 'Mitarbeiter;Datum;Stueckzahl\n';
-
+    let csv = 'Mitarbeiter;Datum;Stückzahl\n';
     for (const row of result.rows) {
-      const d = row.date;
-      const dateFormatted = `${String(d.getDate()).padStart(2, '0')}.${String(d.getMonth() + 1).padStart(2, '0')}.${d.getFullYear()}`;
-      csv += `${row.employee};${dateFormatted};${row.count}\n`;
+      csv += `${row.employee};${row.datum};${row.count}\n`;
     }
 
     const filename = month ? `export_${month}.csv` : 'export_gesamt.csv';

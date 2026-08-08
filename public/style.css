@@ -62,6 +62,17 @@ header h1 {
   background: rgba(74, 108, 247, 0.1);
 }
 
+.error-banner {
+  max-width: 800px;
+  margin: 16px auto -8px;
+  padding: 12px 16px;
+  background: #fdeaea;
+  border: 1px solid #e7b4b4;
+  border-radius: 8px;
+  color: #8c2b2b;
+  font-size: 14px;
+}
+
 main {
   max-width: 800px;
   margin: 0 auto;
