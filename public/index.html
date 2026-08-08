@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Stückzähler - RTB</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>Stückzähler</h1>
+    <div class="date-display" id="currentDate"></div>
+  </header>
+
+  <nav class="tabs" id="tabs"></nav>
+
+  <main>
+    <section class="counter-section" id="counterSection">
+      <div class="counter-box">
+        <button class="counter-btn decrement" id="btnDecrement" title="Minus">−</button>
+        <div class="counter-value" id="counterValue">0</div>
+        <button class="counter-btn increment" id="btnIncrement" title="Plus">+</button>
+      </div>
+      <p class="counter-label">Stück heute</p>
+    </section>
+
+    <section class="history-section">
+      <div class="history-header">
+        <h2>Erfasste Daten</h2>
+        <div class="history-controls">
+          <select id="filterMonth">
+            <option value="">Alle Monate</option>
+          </select>
+        </div>
+      </div>
+      <div class="table-wrapper">
+        <table id="historyTable">
+          <thead>
+            <tr>
+              <th>Mitarbeiter</th>
+              <th>Datum</th>
+              <th>Stückzahl</th>
+            </tr>
+          </thead>
+          <tbody id="historyBody"></tbody>
+        </table>
+        <p class="empty-state" id="emptyState">Noch keine Daten erfasst.</p>
+      </div>
+    </section>
+
+    <section class="export-section">
+      <h2>Export</h2>
+      <div class="export-buttons">
+        <button class="btn-export" id="btnExportAll">Alle Daten exportieren (CSV)</button>
+        <button class="btn-export" id="btnExportMonth">Aktuellen Monat exportieren (CSV)</button>
+      </div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
