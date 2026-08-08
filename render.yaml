@@ -1,7 +1,10 @@
-databases:
-  - name: counter-rtb-db
-    plan: free
-    databaseName: counter_rtb
+# Die Datenbank liegt bei Neon (kostenlos, ohne Ablaufdatum) und wird absichtlich
+# NICHT hier deklariert. Kostenlose Render-Datenbanken laufen nach 30 Tagen ab und
+# werden danach gelöscht.
+#
+# DATABASE_URL wird in Render manuell gesetzt:
+#   Dashboard -> counter-rtb -> Environment -> DATABASE_URL
+# Deshalb steht hier sync: false - der Wert wird nicht aus dieser Datei überschrieben.
 
 services:
   - type: web
@@ -12,6 +15,4 @@ services:
     startCommand: node server.js
     envVars:
       - key: DATABASE_URL
-        fromDatabase:
-          name: counter-rtb-db
-          property: connectionString
+        sync: false
