@@ -44,6 +44,19 @@ async function initDatabase() {
     await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS counts_employee_date_category_key ON counts (employee, date, category)`);
     await client.query(`ALTER TABLE counts DROP CONSTRAINT IF EXISTS counts_employee_date_key`);
 
+    // Tagesnotiz je Mitarbeiter und Tag.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS notes (
+        employee   TEXT        NOT NULL,
+        date       DATE        NOT NULL,
+        note       TEXT        NOT NULL DEFAULT '',
+        rev        BIGINT      NOT NULL DEFAULT 0,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (employee, date)
+      )
+    `);
+    await client.query(`ALTER TABLE notes ADD COLUMN IF NOT EXISTS rev BIGINT NOT NULL DEFAULT 0`);
+
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK');
@@ -80,12 +93,75 @@ function parseTarget(req, res) {
   return { employee, category, label: CATEGORIES[category] };
 }
 
-// Summen-Spalten fuer Abfragen, die pro Mitarbeiter und Tag eine Zeile liefern.
-const SUM_COLUMNS = `
-  SUM(count) FILTER (WHERE category = 'RTB')::int AS rtb,
-  SUM(count) FILTER (WHERE category = 'C&C')::int AS cc,
-  SUM(count)::int AS total
-`;
+const NOTE_MAX_LENGTH = 2000;
+
+// Eine Zeile pro Mitarbeiter und Tag: Summen beider Zaehler plus Notiz.
+// Tage mit nur einer Notiz (ohne Stueckzahl) erscheinen ebenfalls.
+// Filter werden als SQL-Bedingung auf "employee", "date" und "month" (YYYY-MM) uebergeben.
+function dailyQuery(whereSql, dateFormat, orderSql) {
+  return `
+    WITH c AS (
+      SELECT employee, date,
+             SUM(count) FILTER (WHERE category = 'RTB')::int AS rtb,
+             SUM(count) FILTER (WHERE category = 'C&C')::int AS cc,
+             SUM(count)::int AS total
+      FROM counts WHERE count > 0
+      GROUP BY employee, date
+    ),
+    n AS (
+      SELECT employee, date, note FROM notes WHERE note <> ''
+    ),
+    d AS (
+      SELECT COALESCE(c.employee, n.employee) AS employee,
+             COALESCE(c.date, n.date) AS date,
+             COALESCE(c.rtb, 0) AS rtb,
+             COALESCE(c.cc, 0) AS cc,
+             COALESCE(c.total, 0) AS total,
+             COALESCE(n.note, '') AS note
+      FROM c FULL OUTER JOIN n ON c.employee = n.employee AND c.date = n.date
+    )
+    SELECT employee, TO_CHAR(date, '${dateFormat}') AS date, rtb, cc, total, note
+    FROM d
+    WHERE ${whereSql}
+    ORDER BY ${orderSql}
+  `;
+}
+
+// Baut die WHERE-Bedingung fuer Mitarbeiter-/Monatsfilter; sendet bei Fehler 400.
+function buildFilters(query, res) {
+  const { employee, month } = query;
+  const conditions = ['TRUE'];
+  const params = [];
+
+  if (employee) {
+    if (!EMPLOYEES.includes(employee)) {
+      res.status(400).json({ error: 'Unbekannter Mitarbeiter' });
+      return null;
+    }
+    params.push(employee);
+    conditions.push(`employee = $${params.length}`);
+  }
+
+  if (month) {
+    if (!isValidMonth(month)) {
+      res.status(400).json({ error: 'Ungueltiger Monat' });
+      return null;
+    }
+    params.push(month);
+    conditions.push(`TO_CHAR(date, 'YYYY-MM') = $${params.length}`);
+  }
+
+  return { where: conditions.join(' AND '), params, month };
+}
+
+// CSV-Feld absichern: Anfuehrungszeichen bei Trennzeichen/Umbruechen, und
+// Formeln verhindern (Excel wuerde "=..." sonst als Formel ausfuehren).
+function csvField(value) {
+  let s = String(value ?? '');
+  if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+  if (/[;"\r\n]/.test(s)) s = '"' + s.replace(/"/g, '""') + '"';
+  return s;
+}
 
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', date: todayString() });
@@ -123,7 +199,13 @@ app.get('/api/count/:employee', async (req, res) => {
       counts[key] = row ? row.count : 0;
     }
 
-    res.json({ employee, date, counts });
+    const noteResult = await pool.query(
+      'SELECT note FROM notes WHERE employee = $1 AND date = $2',
+      [employee, date]
+    );
+    const note = noteResult.rows.length > 0 ? noteResult.rows[0].note : '';
+
+    res.json({ employee, date, counts, note });
   } catch (err) {
     console.error('Fehler bei GET /api/count:', err.message);
     res.status(500).json({ error: 'Datenbankfehler' });
@@ -183,36 +265,60 @@ app.post('/api/count/:employee/:category/decrement', async (req, res) => {
   }
 });
 
+// Tagesnotiz fuer heute speichern (ersetzt den bisherigen Text komplett).
+// Leerer Text loescht die Notiz.
+//
+// "rev" ist der Zeitpunkt (ms), zu dem der Text im Browser erfasst wurde.
+// Gespeichert wird nur, wenn er nicht aelter ist als der vorhandene - so kann
+// eine verspaetet ankommende Anfrage nie einen neueren Text ueberschreiben.
+app.put('/api/note/:employee', async (req, res) => {
+  try {
+    const { employee } = req.params;
+    const text = req.body && req.body.note;
+    const rev = req.body && req.body.rev;
+
+    if (!EMPLOYEES.includes(employee)) {
+      return res.status(400).json({ error: 'Unbekannter Mitarbeiter' });
+    }
+    if (typeof text !== 'string') {
+      return res.status(400).json({ error: 'Notiz fehlt' });
+    }
+    if (text.length > NOTE_MAX_LENGTH) {
+      return res.status(400).json({ error: `Notiz zu lang (max. ${NOTE_MAX_LENGTH} Zeichen)` });
+    }
+    if (!Number.isSafeInteger(rev) || rev <= 0) {
+      return res.status(400).json({ error: 'Ungueltige Version' });
+    }
+
+    const date = todayString();
+    const note = text.trim() === '' ? '' : text;
+
+    const result = await pool.query(
+      `INSERT INTO notes (employee, date, note, rev, updated_at) VALUES ($1, $2, $3, $4, now())
+       ON CONFLICT (employee, date) DO UPDATE
+         SET note = EXCLUDED.note, rev = EXCLUDED.rev, updated_at = now()
+         WHERE notes.rev <= EXCLUDED.rev`,
+      [employee, date, note, rev]
+    );
+
+    res.json({ employee, date, saved: result.rowCount > 0 });
+  } catch (err) {
+    console.error('Fehler bei PUT /note:', err.message);
+    res.status(500).json({ error: 'Datenbankfehler' });
+  }
+});
+
 app.get('/api/history', async (req, res) => {
   try {
-    const { employee, month } = req.query;
+    const filters = buildFilters(req.query, res);
+    if (!filters) return;
 
     // Datum als Text aus der Datenbank: keine Zeitzonen-Umrechnung moeglich.
-    let query = `SELECT employee, TO_CHAR(date, 'YYYY-MM-DD') AS date, ${SUM_COLUMNS}
-                 FROM counts WHERE count > 0`;
-    const params = [];
-    let paramIndex = 1;
-
-    if (employee) {
-      if (!EMPLOYEES.includes(employee)) {
-        return res.status(400).json({ error: 'Unbekannter Mitarbeiter' });
-      }
-      query += ` AND employee = $${paramIndex++}`;
-      params.push(employee);
-    }
-
-    if (month) {
-      if (!isValidMonth(month)) {
-        return res.status(400).json({ error: 'Ungueltiger Monat' });
-      }
-      query += ` AND TO_CHAR(date, 'YYYY-MM') = $${paramIndex++}`;
-      params.push(month);
-    }
-
-    query += ' GROUP BY employee, date ORDER BY date DESC, employee ASC';
-
-    const result = await pool.query(query, params);
-    res.json(result.rows.map(r => ({ ...r, rtb: r.rtb || 0, cc: r.cc || 0 })));
+    const result = await pool.query(
+      dailyQuery(filters.where, 'YYYY-MM-DD', 'd.date DESC, employee ASC'),
+      filters.params
+    );
+    res.json(result.rows);
   } catch (err) {
     console.error('Fehler bei GET /history:', err.message);
     res.status(500).json({ error: 'Datenbankfehler' });
@@ -221,27 +327,19 @@ app.get('/api/history', async (req, res) => {
 
 app.get('/api/export/csv', async (req, res) => {
   try {
-    const { month } = req.query;
+    // Export immer ueber alle Mitarbeiter, nur nach Monat filterbar.
+    const filters = buildFilters({ month: req.query.month }, res);
+    if (!filters) return;
+    const { month } = filters;
 
-    let query = `SELECT employee, TO_CHAR(date, 'DD.MM.YYYY') AS datum, ${SUM_COLUMNS}
-                 FROM counts WHERE count > 0`;
-    const params = [];
+    const result = await pool.query(
+      dailyQuery(filters.where, 'DD.MM.YYYY', 'employee ASC, d.date ASC'),
+      filters.params
+    );
 
-    if (month) {
-      if (!isValidMonth(month)) {
-        return res.status(400).json({ error: 'Ungueltiger Monat' });
-      }
-      query += ` AND TO_CHAR(date, 'YYYY-MM') = $1`;
-      params.push(month);
-    }
-
-    query += ' GROUP BY employee, date ORDER BY employee ASC, date ASC';
-
-    const result = await pool.query(query, params);
-
-    let csv = 'Mitarbeiter;Datum;RTB;C&C;Gesamt\n';
+    let csv = 'Mitarbeiter;Datum;RTB;C&C;Gesamt;Notiz\n';
     for (const row of result.rows) {
-      csv += `${row.employee};${row.datum};${row.rtb || 0};${row.cc || 0};${row.total}\n`;
+      csv += [row.employee, row.date, row.rtb, row.cc, row.total, row.note].map(csvField).join(';') + '\n';
     }
 
     const filename = month ? `export_${month}.csv` : 'export_gesamt.csv';

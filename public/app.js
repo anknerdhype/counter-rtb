@@ -114,17 +114,27 @@ async function loadEmployees() {
 }
 
 async function selectEmployee(name) {
+  // Ungespeicherte Notiz des bisherigen Mitarbeiters sofort sichern.
+  flushNote();
+
   currentEmployee = name;
 
   document.querySelectorAll('.tabs button').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.employee === name);
   });
 
-  await loadCounts();
+  // Notizfeld bis zum Laden sperren, damit niemand in die Notiz eines
+  // anderen Mitarbeiters tippt.
+  const input = noteInput();
+  input.value = '';
+  input.disabled = true;
+  setNoteStatus('');
+
+  await loadCounts({ withNote: true });
   await loadHistory();
 }
 
-async function loadCounts() {
+async function loadCounts({ withNote = false } = {}) {
   const employee = currentEmployee;
   try {
     const res = await apiFetch(`${API}/count/${encodeURIComponent(employee)}?date=${todayString()}`, undefined, READ_RETRY);
@@ -136,10 +146,126 @@ async function loadCounts() {
       counts[key] = data.counts[key] || 0;
       renderCount(key);
     }
+    if (withNote) {
+      noteInput().value = data.note || '';
+      noteInput().disabled = false;
+    }
     clearError();
   } catch (e) {
     showError('Zaehlerstand konnte nicht geladen werden.');
   }
+}
+
+// ---------- Tagesnotiz ----------
+//
+// Gespeichert wird automatisch kurz nach dem Tippen, beim Verlassen des Feldes,
+// beim Tab-Wechsel und wenn die Seite in den Hintergrund geht (Handy gesperrt,
+// App gewechselt). Jeder Speichervorgang traegt den Zeitpunkt, zu dem der Text
+// erfasst wurde ("rev"); der Server uebernimmt nur Neueres. Damit kann ein
+// aelterer Text nie einen neueren ueberschreiben, egal in welcher Reihenfolge
+// die Anfragen ankommen. Zusaetzlich laeuft pro Mitarbeiter hoechstens ein
+// normaler Speichervorgang gleichzeitig.
+
+// Streng steigender Zeitstempel, auch bei zwei Aufrufen in derselben Millisekunde.
+let lastRev = 0;
+function nextRev() {
+  lastRev = Math.max(Date.now(), lastRev + 1);
+  return lastRev;
+}
+
+const NOTE_DEBOUNCE_MS = 800;
+let noteTimer = null;
+let noteDirtyFor = null;          // Mitarbeiter, dessen Notiz ungespeichert ist
+const noteSaving = {};            // employee -> { busy, queued }
+
+function noteInput() {
+  return document.getElementById('noteInput');
+}
+
+function setNoteStatus(text, isError = false) {
+  const el = document.getElementById('noteStatus');
+  el.textContent = text;
+  el.classList.toggle('error', isError);
+}
+
+function onNoteInput() {
+  noteDirtyFor = currentEmployee;
+  setNoteStatus('Wird gespeichert …');
+  clearTimeout(noteTimer);
+  noteTimer = setTimeout(flushNote, NOTE_DEBOUNCE_MS);
+}
+
+function flushNote() {
+  clearTimeout(noteTimer);
+  noteTimer = null;
+  if (!noteDirtyFor) return;
+  const employee = noteDirtyFor;
+  noteDirtyFor = null;
+  saveNote(employee, { note: noteInput().value, rev: nextRev() });
+}
+
+async function saveNote(employee, payload) {
+  const state = noteSaving[employee] || (noteSaving[employee] = { busy: false, queued: null });
+  if (state.busy) {
+    state.queued = payload;
+    return;
+  }
+
+  state.busy = true;
+  let failed = false;
+  try {
+    // Speichern ersetzt den ganzen Text und ist ueber "rev" abgesichert -
+    // eine Wiederholung ist daher harmlos.
+    await apiFetch(
+      `${API}/note/${encodeURIComponent(employee)}`,
+      { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) },
+      READ_RETRY
+    );
+  } catch (e) {
+    failed = true;
+  } finally {
+    state.busy = false;
+  }
+
+  if (state.queued !== null) {
+    const next = state.queued;
+    state.queued = null;
+    return saveNote(employee, next);
+  }
+
+  if (employee !== currentEmployee) {
+    if (failed) showError(`Notiz für ${employee} wurde nicht gespeichert.`);
+    return;
+  }
+
+  if (noteDirtyFor !== employee) {
+    if (failed) {
+      setNoteStatus('Notiz nicht gespeichert - bitte erneut versuchen.', true);
+      noteDirtyFor = employee;  // beim naechsten Anlass erneut senden
+    } else {
+      setNoteStatus('Gespeichert');
+      loadHistory();
+    }
+  }
+}
+
+// Letzte Rettung, wenn die Seite verlassen oder das Handy gesperrt wird:
+// keepalive laesst die Anfrage auch nach dem Schliessen noch ankommen.
+function flushNoteOnLeave() {
+  if (!noteDirtyFor) return;
+  clearTimeout(noteTimer);
+  const employee = noteDirtyFor;
+  noteDirtyFor = null;
+  fetch(`${API}/note/${encodeURIComponent(employee)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ note: noteInput().value, rev: nextRev() }),
+    keepalive: true
+  }).catch(() => {});
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
 async function changeCount(category, delta) {
@@ -210,14 +336,17 @@ async function loadHistory() {
   emptyState.style.display = 'none';
   table.style.display = 'table';
 
+  // Notizen sind freier Text - unbedingt maskieren, sonst koennte HTML darin
+  // ausgefuehrt werden.
   tbody.innerHTML = rows.map(row => `
-    <tr>
-      <td class="col-employee">${row.employee}</td>
+    <tr${row.note ? ' class="history-row-with-note"' : ''}>
+      <td class="col-employee">${escapeHtml(row.employee)}</td>
       <td>${formatDate(row.date)}</td>
       <td class="num">${row.rtb}</td>
       <td class="num">${row.cc}</td>
       <td class="num">${row.total}</td>
     </tr>
+    ${row.note ? `<tr class="history-note"><td colspan="5">${escapeHtml(row.note)}</td></tr>` : ''}
   `).join('');
 }
 
@@ -248,6 +377,13 @@ for (const key of CATEGORY_KEYS) {
     btn.addEventListener('click', () => changeCount(key, Number(btn.dataset.delta)));
   });
 }
+
+noteInput().addEventListener('input', onNoteInput);
+noteInput().addEventListener('blur', flushNote);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') flushNoteOnLeave();
+});
+window.addEventListener('pagehide', flushNoteOnLeave);
 
 document.getElementById('filterMonth').addEventListener('change', () => loadHistory());
 

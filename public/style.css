@@ -100,6 +100,66 @@ main {
   box-shadow: 0 2px 8px rgba(74, 108, 247, 0.10);
 }
 
+.note-section {
+  background: #fff;
+  border-radius: 12px;
+  padding: 20px 20px 12px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+.note-title {
+  display: block;
+  font-size: 15px;
+  font-weight: 600;
+  color: #16213e;
+  margin-bottom: 10px;
+}
+
+.note-section textarea {
+  width: 100%;
+  min-height: 84px;
+  resize: vertical;
+  padding: 10px 12px;
+  border: 1px solid #d0d4e0;
+  border-radius: 8px;
+  font: inherit;
+  font-size: 16px; /* 16px verhindert das automatische Hineinzoomen auf dem iPhone */
+  line-height: 1.45;
+  color: #1a1a2e;
+  background: #fff;
+}
+
+.note-section textarea:focus {
+  outline: none;
+  border-color: #4a6cf7;
+  box-shadow: 0 0 0 3px rgba(74, 108, 247, 0.15);
+}
+
+.note-status {
+  min-height: 18px;
+  margin-top: 6px;
+  font-size: 13px;
+  color: #6b7085;
+  text-align: right;
+}
+
+.note-status.error {
+  color: #b42318;
+}
+
+.history-note td {
+  padding-top: 0;
+  font-size: 14px;
+  color: #4b5068;
+  font-style: italic;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.history-row-with-note td {
+  border-bottom: none;
+}
+
 .counter-title {
   font-size: 15px;
   font-weight: 600;
@@ -239,7 +299,7 @@ tbody tr:hover {
   background: #f8f9fc;
 }
 
-tbody td:last-child {
+tbody tr:not(.history-note) td:last-child {
   font-weight: 600;
   color: #4a6cf7;
 }

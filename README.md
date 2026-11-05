@@ -14,9 +14,10 @@ exportieren.
 
 - Sechs Mitarbeiter-Tabs: Serkan, Julius, Hannes, Walid, Tobias, Andreas
 - Zwei getrennte Zähler je Mitarbeiter: RTB und C&C
+- Notizfeld zum Arbeitstag unter den Zählern, speichert automatisch
 - Plus/Minus mit sofortiger Anzeige, Minus stoppt bei 0
 - Datum wird automatisch auf den aktuellen Tag gesetzt (deutsche Zeitzone)
-- Tabelle der erfassten Tage mit RTB, C&C und Gesamt, filterbar nach Monat
+- Tabelle der erfassten Tage mit RTB, C&C, Gesamt und Notiz, filterbar nach Monat
 - CSV-Export: alle Daten oder ein einzelner Monat, eine Zeile pro Mitarbeiter und Tag
 - Von mehreren Geräten gleichzeitig nutzbar, gemeinsame Datenbasis
 
@@ -69,6 +70,22 @@ pro Mitarbeiter und Tag, ohne `category`). Beim Start ergänzt der Server die Sp
 Eindeutigkeitsregel. Das läuft in einer Transaktion und ist bei jedem Neustart
 wiederholbar, ohne Daten zu verändern.
 
+Tagesnotizen liegen in einer eigenen Tabelle, eine Zeile pro Mitarbeiter und Tag:
+
+```sql
+CREATE TABLE notes (
+  employee   TEXT        NOT NULL,
+  date       DATE        NOT NULL,
+  note       TEXT        NOT NULL DEFAULT '',
+  rev        BIGINT      NOT NULL DEFAULT 0,   -- Erfassungszeitpunkt im Browser (ms)
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (employee, date)
+);
+```
+
+Verlauf und Export verbinden beide Tabellen; ein Tag mit Notiz, aber ohne
+Stückzahl, erscheint deshalb ebenfalls (mit 0).
+
 Die Zähler sind in `server.js` in `CATEGORIES` festgelegt. In URLs werden Kurznamen
 verwendet (`rtb`, `cc`), weil `&` in Adressen eine Sonderbedeutung hat; in Datenbank
 und Export steht der Anzeigename.
@@ -85,13 +102,17 @@ und Export steht der Anzeigename.
 | GET | `/api/count/:employee?date=YYYY-MM-DD` | Stand beider Zähler eines Tages (Standard: heute) |
 | POST | `/api/count/:employee/:category/increment` | Heutigen Wert eines Zählers um 1 erhöhen |
 | POST | `/api/count/:employee/:category/decrement` | Heutigen Wert eines Zählers um 1 senken (nicht unter 0) |
-| GET | `/api/history?employee=&month=YYYY-MM` | Erfasste Tage mit `rtb`, `cc`, `total` |
+| PUT | `/api/note/:employee` | Heutige Notiz speichern, Body `{ "note": "...", "rev": <ms> }` |
+| GET | `/api/history?employee=&month=YYYY-MM` | Erfasste Tage mit `rtb`, `cc`, `total`, `note` |
 | GET | `/api/export/csv?month=YYYY-MM` | CSV-Download, ohne `month` alle Daten |
 
 `:category` ist `rtb` oder `cc`. Mitarbeitername, Zähler, Datum und Monat werden
 serverseitig geprüft; unbekannte Werte werden mit Status 400 abgewiesen.
 
-CSV-Spalten: `Mitarbeiter;Datum;RTB;C&C;Gesamt`.
+CSV-Spalten: `Mitarbeiter;Datum;RTB;C&C;Gesamt;Notiz`. Notizen werden für CSV
+maskiert (Semikolon, Anführungszeichen, Zeilenumbrüche) und Text, der mit `=`, `+`,
+`-` oder `@` beginnt, bekommt ein `'` vorangestellt, damit Excel ihn nicht als
+Formel ausführt.
 
 Die CSV-Datei ist semikolongetrennt und beginnt mit einem BOM, damit Excel in
 deutscher Einstellung die Spalten und Umlaute direkt korrekt darstellt.
@@ -130,6 +151,16 @@ den echten Stand vom Server. Antworten einzelner Klicks taugen dafür nicht: Der
 Server bearbeitet parallele Anfragen über mehrere Datenbankverbindungen, also nicht
 zwingend in Sende-Reihenfolge – die Antwort auf den zuletzt gesendeten Klick kann
 einen älteren Stand enthalten. Genau das ließ die Anzeige früher hinterherhängen.
+
+**Notizen speichern automatisch und können sich nicht gegenseitig überschreiben.**
+Gespeichert wird kurz nach dem Tippen, beim Verlassen des Feldes, beim Tab-Wechsel
+und wenn die Seite in den Hintergrund geht (Handy gesperrt) – Letzteres per
+`fetch(..., { keepalive: true })`. Jede Speicherung trägt den Zeitpunkt, zu dem der
+Text im Browser erfasst wurde (`rev`); der Server übernimmt nur, was nicht älter ist
+als das Gespeicherte. So gewinnt immer der neueste Text, auch wenn Anfragen in
+anderer Reihenfolge ankommen. Beim Tab-Wechsel ist das Feld gesperrt, bis die Notiz
+des neuen Mitarbeiters geladen ist. Notizen werden in der Tabelle HTML-maskiert
+angezeigt.
 
 ---
 
@@ -190,8 +221,10 @@ Oberfläche.
 
 - **Kein Zugriffsschutz.** Wer die Adresse kennt, kann für jeden Mitarbeiter zählen
   und alle Daten exportieren.
-- **Nur der heutige Tag ist änderbar.** Ein falscher Wert von gestern lässt sich über
-  die Oberfläche nicht korrigieren.
+- **Nur der heutige Tag ist änderbar.** Ein falscher Wert oder eine Notiz von
+  gestern lässt sich über die Oberfläche nicht korrigieren.
+- **Notizen von zwei Geräten gleichzeitig:** Tippen zwei Personen gleichzeitig in
+  dieselbe Tagesnotiz, gewinnt die zuletzt geschriebene Fassung.
 - **Die Tabelle zeigt nur den ausgewählten Mitarbeiter.** Der CSV-Export enthält alle.
 - **Kein Verlauf einzelner Klicks.** Gespeichert wird nur die Tagessumme, nicht der
   Zeitpunkt der einzelnen Erfassung.
