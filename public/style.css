@@ -79,9 +79,10 @@ main {
   padding: 24px 16px;
 }
 
+/* Zaehler immer untereinander - gearbeitet wird fast nur am Handy. */
 .counter-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
   margin-bottom: 24px;
 }
@@ -92,6 +93,11 @@ main {
   background: #fff;
   border-radius: 12px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+.counter-section[data-category="cc"] {
+  background: #eaf1fe;
+  box-shadow: 0 2px 8px rgba(74, 108, 247, 0.10);
 }
 
 .counter-title {
@@ -288,10 +294,6 @@ tbody td:last-child {
     flex-direction: column;
     gap: 8px;
     text-align: center;
-  }
-
-  .counter-grid {
-    grid-template-columns: 1fr;
   }
 
   .col-employee {
