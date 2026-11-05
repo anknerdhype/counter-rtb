@@ -1,9 +1,10 @@
 # Counter RTB – Stückzähler
 
 Weboberfläche, mit der sechs Mitarbeiter ihre tagesaktuell fertiggestellten Stücke
-per Klick erfassen. Jeder Mitarbeiter hat einen eigenen Tab mit Plus-/Minus-Knopf
-und der aktuellen Zahl. Die Erfassung wird pro Mitarbeiter und Tag gespeichert und
-lässt sich als CSV exportieren.
+per Klick erfassen. Jeder Mitarbeiter hat einen eigenen Tab mit zwei Zählern,
+**RTB** und **C&C**, jeweils mit Plus-/Minus-Knopf und der aktuellen Zahl. Die
+Erfassung wird pro Mitarbeiter, Tag und Zähler gespeichert und lässt sich als CSV
+exportieren.
 
 **Live:** https://counter-rtb.onrender.com
 
@@ -12,10 +13,11 @@ lässt sich als CSV exportieren.
 ## Funktionen
 
 - Sechs Mitarbeiter-Tabs: Serkan, Julius, Hannes, Walid, Tobias, Andreas
+- Zwei getrennte Zähler je Mitarbeiter: RTB und C&C
 - Plus/Minus mit sofortiger Anzeige, Minus stoppt bei 0
 - Datum wird automatisch auf den aktuellen Tag gesetzt (deutsche Zeitzone)
-- Tabelle der erfassten Tage, filterbar nach Monat
-- CSV-Export: alle Daten oder ein einzelner Monat
+- Tabelle der erfassten Tage mit RTB, C&C und Gesamt, filterbar nach Monat
+- CSV-Export: alle Daten oder ein einzelner Monat, eine Zeile pro Mitarbeiter und Tag
 - Von mehreren Geräten gleichzeitig nutzbar, gemeinsame Datenbasis
 
 ---
@@ -44,20 +46,32 @@ NEON-UMZUG.md       Anleitung für den Datenbankumzug zu Neon
 
 ## Datenmodell
 
-Eine Tabelle, die beim Serverstart automatisch angelegt wird:
+Eine Tabelle, die beim Serverstart automatisch angelegt bzw. angepasst wird:
 
 ```sql
 CREATE TABLE counts (
   id       SERIAL PRIMARY KEY,
   employee TEXT    NOT NULL,
   date     DATE    NOT NULL,
-  count    INTEGER NOT NULL DEFAULT 0,
-  UNIQUE(employee, date)
+  category TEXT    NOT NULL DEFAULT 'RTB',   -- 'RTB' oder 'C&C'
+  count    INTEGER NOT NULL DEFAULT 0
 );
+CREATE UNIQUE INDEX counts_employee_date_category_key
+  ON counts (employee, date, category);
 ```
 
-Pro Mitarbeiter und Tag existiert genau eine Zeile. Zeilen mit `count = 0` werden in
-Tabelle und Export ausgeblendet.
+Pro Mitarbeiter, Tag und Zähler existiert genau eine Zeile. Zeilen mit `count = 0`
+werden in Tabelle und Export ausgeblendet.
+
+**Umstellung auf zwei Zähler.** Bis November 2026 gab es nur einen Zähler (eine Zeile
+pro Mitarbeiter und Tag, ohne `category`). Beim Start ergänzt der Server die Spalte
+`category` – bestehende Einträge werden dabei zu RTB – und ersetzt die alte
+Eindeutigkeitsregel. Das läuft in einer Transaktion und ist bei jedem Neustart
+wiederholbar, ohne Daten zu verändern.
+
+Die Zähler sind in `server.js` in `CATEGORIES` festgelegt. In URLs werden Kurznamen
+verwendet (`rtb`, `cc`), weil `&` in Adressen eine Sonderbedeutung hat; in Datenbank
+und Export steht der Anzeigename.
 
 ---
 
@@ -67,14 +81,17 @@ Tabelle und Export ausgeblendet.
 |---------|------|-------|
 | GET | `/api/health` | Statusprüfung, liefert auch das Serverdatum |
 | GET | `/api/employees` | Liste der Mitarbeiter |
-| GET | `/api/count/:employee?date=YYYY-MM-DD` | Stand eines Tages (Standard: heute) |
-| POST | `/api/count/:employee/increment` | Heutigen Wert um 1 erhöhen |
-| POST | `/api/count/:employee/decrement` | Heutigen Wert um 1 senken (nicht unter 0) |
-| GET | `/api/history?employee=&month=YYYY-MM` | Erfasste Tage, optional gefiltert |
+| GET | `/api/categories` | Liste der Zähler (`rtb` → RTB, `cc` → C&C) |
+| GET | `/api/count/:employee?date=YYYY-MM-DD` | Stand beider Zähler eines Tages (Standard: heute) |
+| POST | `/api/count/:employee/:category/increment` | Heutigen Wert eines Zählers um 1 erhöhen |
+| POST | `/api/count/:employee/:category/decrement` | Heutigen Wert eines Zählers um 1 senken (nicht unter 0) |
+| GET | `/api/history?employee=&month=YYYY-MM` | Erfasste Tage mit `rtb`, `cc`, `total` |
 | GET | `/api/export/csv?month=YYYY-MM` | CSV-Download, ohne `month` alle Daten |
 
-Mitarbeitername, Datum und Monat werden serverseitig geprüft; unbekannte Werte
-werden mit Status 400 abgewiesen.
+`:category` ist `rtb` oder `cc`. Mitarbeitername, Zähler, Datum und Monat werden
+serverseitig geprüft; unbekannte Werte werden mit Status 400 abgewiesen.
+
+CSV-Spalten: `Mitarbeiter;Datum;RTB;C&C;Gesamt`.
 
 Die CSV-Datei ist semikolongetrennt und beginnt mit einem BOM, damit Excel in
 deutscher Einstellung die Spalten und Umlaute direkt korrekt darstellt.
@@ -106,9 +123,13 @@ ist gesichert, dass nichts in der Datenbank angekommen ist. Bei Netzwerkabbrüch
 oder Serverfehlern wird **nicht** wiederholt, weil sonst ein Klick doppelt gezählt
 werden könnte. Schlägt ein Klick fehl, erscheint ein Hinweisbanner.
 
-**Die Anzeige aktualisiert sich sofort, die Serverantwort korrigiert nach.**
-Jede Anfrage trägt eine laufende Nummer; nur die Antwort auf die jüngste Anfrage
-darf die Anzeige setzen. Das hält schnelles Klicken flüssig und konsistent.
+**Die Anzeige zählt sofort mit, abgeglichen wird erst nach dem letzten Klick.**
+Jeder Klick erhöht die Anzeige sofort. Pro Mitarbeiter und Zähler wird mitgezählt,
+wie viele Anfragen noch unterwegs sind; erst wenn alle fertig sind, holt die Seite
+den echten Stand vom Server. Antworten einzelner Klicks taugen dafür nicht: Der
+Server bearbeitet parallele Anfragen über mehrere Datenbankverbindungen, also nicht
+zwingend in Sende-Reihenfolge – die Antwort auf den zuletzt gesendeten Klick kann
+einen älteren Stand enthalten. Genau das ließ die Anzeige früher hinterherhängen.
 
 ---
 

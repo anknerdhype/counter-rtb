@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Stückzähler - RTB</title>
+  <title>Stückzähler - RTB &amp; C&amp;C</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -17,13 +17,26 @@
   <div class="error-banner" id="errorBanner" role="alert" hidden></div>
 
   <main>
-    <section class="counter-section" id="counterSection">
-      <div class="counter-box">
-        <button class="counter-btn decrement" id="btnDecrement" title="Minus">−</button>
-        <div class="counter-value" id="counterValue">0</div>
-        <button class="counter-btn increment" id="btnIncrement" title="Plus">+</button>
+    <section class="counter-grid" id="counterSection">
+      <div class="counter-section" data-category="rtb">
+        <h2 class="counter-title">RTB</h2>
+        <div class="counter-box">
+          <button class="counter-btn decrement" data-delta="-1" title="RTB minus" aria-label="RTB minus">−</button>
+          <div class="counter-value" data-role="value">0</div>
+          <button class="counter-btn increment" data-delta="1" title="RTB plus" aria-label="RTB plus">+</button>
+        </div>
+        <p class="counter-label">Stück heute</p>
       </div>
-      <p class="counter-label">Stück heute</p>
+
+      <div class="counter-section" data-category="cc">
+        <h2 class="counter-title">C&amp;C</h2>
+        <div class="counter-box">
+          <button class="counter-btn decrement" data-delta="-1" title="C&amp;C minus" aria-label="C&amp;C minus">−</button>
+          <div class="counter-value" data-role="value">0</div>
+          <button class="counter-btn increment" data-delta="1" title="C&amp;C plus" aria-label="C&amp;C plus">+</button>
+        </div>
+        <p class="counter-label">Stück heute</p>
+      </div>
     </section>
 
     <section class="history-section">
@@ -39,9 +52,11 @@
         <table id="historyTable">
           <thead>
             <tr>
-              <th>Mitarbeiter</th>
+              <th class="col-employee">Mitarbeiter</th>
               <th>Datum</th>
-              <th>Stückzahl</th>
+              <th class="num">RTB</th>
+              <th class="num">C&amp;C</th>
+              <th class="num">Gesamt</th>
             </tr>
           </thead>
           <tbody id="historyBody"></tbody>

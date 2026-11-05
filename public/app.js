@@ -1,8 +1,16 @@
 const API = window.location.origin + '/api';
+const CATEGORY_KEYS = ['rtb', 'cc'];
 
 let currentEmployee = null;
-let currentCount = 0;
-let requestSeq = 0;
+const counts = { rtb: 0, cc: 0 };
+
+// Anzahl noch laufender Klick-Anfragen je Mitarbeiter und Zaehler.
+// Solange welche laufen, zeigt die Anzeige den sofort hochgezaehlten Wert;
+// erst wenn alle fertig sind, wird der echte Stand vom Server geholt.
+// (Antworten einzelner Klicks sind dafuer ungeeignet: der Server bearbeitet
+// parallele Anfragen nicht zwingend in Sende-Reihenfolge.)
+const inFlight = {};
+const flightKey = (employee, category) => `${employee}|${category}`;
 
 // Statuscodes, die von Renders Proxy stammen (Server schlaeft/startet) und
 // garantiert nicht in der Datenbank angekommen sind - nur die sind fuer
@@ -69,8 +77,18 @@ function showDate() {
   document.getElementById('currentDate').textContent = now.toLocaleDateString('de-DE', options);
 }
 
-function renderCount(value) {
-  document.getElementById('counterValue').textContent = value;
+function counterCard(category) {
+  return document.querySelector(`.counter-section[data-category="${category}"]`);
+}
+
+function renderCount(category) {
+  counterCard(category).querySelector('[data-role="value"]').textContent = counts[category];
+}
+
+function animateCounter(category) {
+  const el = counterCard(category).querySelector('[data-role="value"]');
+  el.style.transform = 'scale(1.15)';
+  setTimeout(() => { el.style.transform = 'scale(1)'; }, 150);
 }
 
 async function loadEmployees() {
@@ -102,62 +120,63 @@ async function selectEmployee(name) {
     btn.classList.toggle('active', btn.dataset.employee === name);
   });
 
-  await loadCount();
+  await loadCounts();
   await loadHistory();
 }
 
-async function loadCount() {
+async function loadCounts() {
   const employee = currentEmployee;
   try {
     const res = await apiFetch(`${API}/count/${encodeURIComponent(employee)}?date=${todayString()}`, undefined, READ_RETRY);
     const data = await res.json();
     if (employee !== currentEmployee) return;
-    currentCount = data.count;
-    renderCount(currentCount);
+    for (const key of CATEGORY_KEYS) {
+      // Zaehler mit laufenden Klicks nicht mit einem Zwischenstand ueberschreiben.
+      if (inFlight[flightKey(employee, key)]) continue;
+      counts[key] = data.counts[key] || 0;
+      renderCount(key);
+    }
     clearError();
   } catch (e) {
     showError('Zaehlerstand konnte nicht geladen werden.');
   }
 }
 
-async function changeCount(delta) {
+async function changeCount(category, delta) {
   const employee = currentEmployee;
   if (!employee) return;
-  if (delta < 0 && currentCount <= 0) return;
+  if (delta < 0 && counts[category] <= 0) return;
 
   const action = delta > 0 ? 'increment' : 'decrement';
-  const mySeq = ++requestSeq;
+  const key = flightKey(employee, category);
 
   // Sofortige Anzeige, damit schnelles Klicken sich fluessig anfuehlt.
-  currentCount = Math.max(0, currentCount + delta);
-  renderCount(currentCount);
-  if (delta > 0) animateCounter();
+  counts[category] = Math.max(0, counts[category] + delta);
+  renderCount(category);
+  if (delta > 0) animateCounter(category);
 
+  inFlight[key] = (inFlight[key] || 0) + 1;
+  let failed = false;
   try {
-    const res = await apiFetch(
-      `${API}/count/${encodeURIComponent(employee)}/${action}`,
+    await apiFetch(
+      `${API}/count/${encodeURIComponent(employee)}/${category}/${action}`,
       { method: 'POST' },
       WRITE_RETRY
     );
-    const data = await res.json();
-
-    // Nur die Antwort auf die zuletzt gesendete Anfrage darf die Anzeige setzen.
-    if (mySeq === requestSeq && employee === currentEmployee) {
-      currentCount = data.count;
-      renderCount(currentCount);
-    }
-    clearError();
-    if (employee === currentEmployee) await loadHistory();
   } catch (e) {
-    showError('Klick konnte nicht gespeichert werden - bitte erneut klicken.');
-    if (employee === currentEmployee) await loadCount();
+    failed = true;
+  } finally {
+    inFlight[key] -= 1;
   }
-}
 
-function animateCounter() {
-  const el = document.getElementById('counterValue');
-  el.style.transform = 'scale(1.15)';
-  setTimeout(() => { el.style.transform = 'scale(1)'; }, 150);
+  // Erst wenn alle Klicks dieses Zaehlers gespeichert sind: echten Stand holen.
+  if (inFlight[key] === 0 && employee === currentEmployee) {
+    await loadCounts();
+    await loadHistory();
+  }
+
+  // Zuletzt, damit das erfolgreiche Nachladen den Hinweis nicht wieder ausblendet.
+  if (failed) showError('Klick konnte nicht gespeichert werden - bitte erneut klicken.');
 }
 
 async function loadHistory() {
@@ -193,9 +212,11 @@ async function loadHistory() {
 
   tbody.innerHTML = rows.map(row => `
     <tr>
-      <td>${row.employee}</td>
+      <td class="col-employee">${row.employee}</td>
       <td>${formatDate(row.date)}</td>
-      <td>${row.count}</td>
+      <td class="num">${row.rtb}</td>
+      <td class="num">${row.cc}</td>
+      <td class="num">${row.total}</td>
     </tr>
   `).join('');
 }
@@ -222,15 +243,16 @@ function exportCSV(month) {
   window.location.href = url;
 }
 
-document.getElementById('btnIncrement').addEventListener('click', () => changeCount(1));
-document.getElementById('btnDecrement').addEventListener('click', () => changeCount(-1));
+for (const key of CATEGORY_KEYS) {
+  counterCard(key).querySelectorAll('.counter-btn').forEach(btn => {
+    btn.addEventListener('click', () => changeCount(key, Number(btn.dataset.delta)));
+  });
+}
 
 document.getElementById('filterMonth').addEventListener('change', () => loadHistory());
 
 document.getElementById('btnExportAll').addEventListener('click', () => exportCSV(null));
 document.getElementById('btnExportMonth').addEventListener('click', () => exportCSV(currentMonthString()));
-
-document.getElementById('counterValue').style.transition = 'transform 0.15s ease';
 
 showDate();
 populateMonthFilter();
